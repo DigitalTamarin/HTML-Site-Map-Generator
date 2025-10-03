@@ -3,7 +3,7 @@
  * Plugin Name: HTML & XML Site Map Generator
  * Plugin URI: https://denistamarin.ru/html-site-map-generator
  * Description: Advanced HTML and XML sitemap generator with admin settings. Генератор HTML и XML карт сайта с настройками в админке.
- * Version: 3.0.0
+ * Version: 4.0.0
  * Author: Denis Tamarin
  * Author URI: https://denistamarin.ru/
  * License: GPL v2 or later
@@ -24,10 +24,11 @@ if (defined('HTML_SITE_MAP_GENERATOR_VERSION')) {
 }
 
 // Константы плагина
-define('HTML_SITE_MAP_GENERATOR_VERSION', '3.0.0');
+define('HTML_SITE_MAP_GENERATOR_VERSION', '4.0.0');
 define('HTML_SITE_MAP_GENERATOR_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('HTML_SITE_MAP_GENERATOR_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('HTML_SITE_MAP_GENERATOR_BASENAME', plugin_basename(__FILE__));
+define('HTML_SITE_MAP_GENERATOR_SITEMAP_PATH', ABSPATH . 'sitemap.xml');
 
 // Подключаем основной класс
 require_once HTML_SITE_MAP_GENERATOR_PLUGIN_PATH . 'includes/class-html-site-map-generator.php';
@@ -65,22 +66,22 @@ function html_site_map_generator_activate() {
         'include_posts' => '',
         'exclude_categories' => '',
         'include_categories' => '',
+        'posts_from_categories' => '',
         'orderby' => 'title',
         'order' => 'ASC',
         'posts_per_section' => '0',
         'include_post_types' => array(),
         'include_taxonomies' => array(),
         'xml_enabled' => 'true',
-        'xml_include_posts' => 'true',
-        'xml_include_pages' => 'true',
-        'xml_include_categories' => 'true',
-        'xml_include_custom_post_types' => 'true',
+        'xml_auto_update' => 'true',
         'xml_change_frequency' => 'weekly',
         'xml_priority' => '0.7'
     );
     
     add_option('html_site_map_generator_options', $default_options);
-    flush_rewrite_rules();
+    
+    // Создаем первоначальный sitemap.xml
+    HTML_Site_Map_Generator::generate_sitemap_file();
 }
 register_activation_hook(__FILE__, 'html_site_map_generator_activate');
 
@@ -88,9 +89,25 @@ register_activation_hook(__FILE__, 'html_site_map_generator_activate');
  * Деактивация плагина
  */
 function html_site_map_generator_deactivate() {
-    flush_rewrite_rules();
+    // Не удаляем файл sitemap.xml при деактивации
+    // Пользователь может временно отключить плагин
 }
 register_deactivation_hook(__FILE__, 'html_site_map_generator_deactivate');
+
+/**
+ * Удаление плагина
+ */
+function html_site_map_generator_uninstall() {
+    // Удаляем настройки
+    delete_option('html_site_map_generator_options');
+    delete_option('html_sitemap_cache_version');
+    
+    // Удаляем файл sitemap.xml
+    if (file_exists(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH)) {
+        unlink(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH);
+    }
+}
+register_uninstall_hook(__FILE__, 'html_site_map_generator_uninstall');
 
 /**
  * Добавляем ссылку на настройки в списке плагинов

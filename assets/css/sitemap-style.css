@@ -9,8 +9,6 @@
   margin-bottom: 30px;
   padding: 20px;
   background: #f9f9f9;
-  border-radius: 8px;
-  border-left: 4px solid #0073aa;
 }
 
 .sitemap-title {
@@ -27,7 +25,6 @@
 
 .category-title {
   font-size: 18px;
-  color: #0073aa;
   margin: 15px 0 10px 0;
 }
 
@@ -54,7 +51,6 @@
 
 .comments-count {
   font-size: 12px;
-  color: #0073aa;
   background: #f0f0f0;
   padding: 2px 6px;
   border-radius: 3px;
@@ -80,13 +76,12 @@
   color: #333;
   text-decoration: none;
   display: block;
-  padding: 5px 10px;
+  padding: 5px 20px;
   transition: all 0.3s ease;
   border-radius: 4px;
 }
 
 .sitemap-link:hover {
-  color: #0073aa;
   background-color: #f0f0f0;
   text-decoration: none;
 }

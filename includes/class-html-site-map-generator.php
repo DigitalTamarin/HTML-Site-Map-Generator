@@ -20,70 +20,126 @@ class HTML_Site_Map_Generator {
         // Шорткод для HTML карты
         add_shortcode('html_sitemap', array(__CLASS__, 'generate_html_sitemap'));
         
-        // Обработка XML карты
-        add_action('init', array(__CLASS__, 'handle_xml_sitemap'));
+        // Редирект с виртуального sitemap.xml на реальный файл
+        add_action('template_redirect', array(__CLASS__, 'handle_sitemap_redirect'));
         
         add_action('wp_enqueue_scripts', array(__CLASS__, 'enqueue_styles'));
         add_action('admin_menu', array(__CLASS__, 'add_admin_menu'));
         add_action('admin_init', array(__CLASS__, 'settings_init'));
         
-        // Загружаем настройки и устанавливаем значения по умолчанию
-        $default_options = array(
-            'show_pages' => 'true',
-            'show_posts' => 'true',
-            'show_categories' => 'true',
-            'show_authors' => 'false',
-            'show_tags' => 'false',
-            'show_date' => 'false',
-            'show_comments_count' => 'false',
-            'exclude_posts' => '',
-            'include_posts' => '',
-            'exclude_categories' => '',
-            'include_categories' => '',
-            'orderby' => 'title',
-            'order' => 'ASC',
-            'posts_per_section' => '0',
-            'include_post_types' => array(),
-            'include_taxonomies' => array(),
-            'xml_enabled' => 'true',
-            'xml_include_posts' => 'true',
-            'xml_include_pages' => 'true',
-            'xml_include_categories' => 'true',
-            'xml_include_custom_post_types' => 'true',
-            'xml_change_frequency' => 'weekly',
-            'xml_priority' => '0.7'
-        );
+        // Автоматическое обновление sitemap.xml при изменении контента
+        add_action('save_post', array(__CLASS__, 'auto_update_sitemap'));
+        add_action('delete_post', array(__CLASS__, 'auto_update_sitemap'));
+        add_action('created_category', array(__CLASS__, 'auto_update_sitemap'));
+        add_action('delete_category', array(__CLASS__, 'auto_update_sitemap'));
+        add_action('edited_category', array(__CLASS__, 'auto_update_sitemap'));
         
-        self::$options = wp_parse_args(get_option('html_site_map_generator_options', array()), $default_options);
+        // Загружаем настройки
+        self::$options = get_option('html_site_map_generator_options', array());
         
-        // Сохраняем обновленные настройки, если они не существуют
-        if (false === get_option('html_site_map_generator_options')) {
+        // Устанавливаем значения по умолчанию если настройки пустые
+        if (empty(self::$options)) {
+            $default_options = array(
+                'show_pages' => 'true',
+                'show_posts' => 'true',
+                'show_categories' => 'true',
+                'show_authors' => 'false',
+                'show_tags' => 'false',
+                'show_date' => 'false',
+                'show_comments_count' => 'false',
+                'exclude_posts' => '',
+                'include_posts' => '',
+                'exclude_categories' => '',
+                'include_categories' => '',
+                'posts_from_categories' => '',
+                'orderby' => 'title',
+                'order' => 'ASC',
+                'posts_per_section' => '0',
+                'include_post_types' => array(),
+                'include_taxonomies' => array(),
+                'xml_enabled' => 'true',
+                'xml_auto_update' => 'true',
+                'xml_change_frequency' => 'weekly',
+                'xml_priority' => '0.7'
+            );
+            
             update_option('html_site_map_generator_options', $default_options);
+            self::$options = $default_options;
         }
     }
-    
+
     /**
-     * Обработка XML карты сайта
+     * Редирект с виртуального sitemap.xml на реальный файл
      */
-    public static function handle_xml_sitemap() {
-        // Проверяем, запрашивается ли sitemap.xml
-        if (isset($_SERVER['REQUEST_URI']) && $_SERVER['REQUEST_URI'] === '/sitemap.xml') {
+    public static function handle_sitemap_redirect() {
+        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
+        
+        // Проверяем запрос sitemap.xml
+        if (preg_match('#^/sitemap\.xml$#', $request_uri) || $request_uri === '/sitemap.xml') {
+            
             // Проверяем, включена ли XML карта в настройках
             $options = get_option('html_site_map_generator_options', array());
             $xml_enabled = isset($options['xml_enabled']) ? $options['xml_enabled'] : 'true';
             
-            if ($xml_enabled === 'true') {
-                header('Content-Type: application/xml; charset=utf-8');
-                echo self::generate_xml_content();
+            if ($xml_enabled === 'true' && file_exists(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH)) {
+                // Редирект на реальный файл
+                wp_redirect(home_url('/sitemap.xml'), 301);
                 exit;
             } else {
-                // Если XML отключена, возвращаем 404
+                // Если XML отключена или файла нет, возвращаем 404
+                global $wp_query;
+                $wp_query->set_404();
                 status_header(404);
                 exit;
             }
         }
     }
-    
+
+    /**
+     * Создание/обновление файла sitemap.xml
+     */
+    public static function generate_sitemap_file() {
+        $xml_content = self::generate_xml_content();
+        
+        // Пытаемся записать файл
+        $result = file_put_contents(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH, $xml_content);
+        
+        if ($result === false) {
+            error_log('HTML Sitemap: Failed to write sitemap.xml file');
+            return false;
+        }
+        
+        // Устанавливаем правильные права
+        chmod(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH, 0644);
+        
+        error_log('HTML Sitemap: sitemap.xml file generated successfully');
+        return true;
+    }
+
+    /**
+     * Автоматическое обновление sitemap.xml
+     */
+    public static function auto_update_sitemap($post_id = null) {
+        // Проверяем, включено ли автообновление
+        $options = get_option('html_site_map_generator_options', array());
+        $auto_update = isset($options['xml_auto_update']) ? $options['xml_auto_update'] : 'true';
+        
+        if ($auto_update !== 'true') {
+            return;
+        }
+        
+        // Для постов проверяем статус
+        if ($post_id) {
+            $post = get_post($post_id);
+            if ($post && $post->post_status !== 'publish' && $post->post_status !== 'trash') {
+                return;
+            }
+        }
+        
+        // Обновляем sitemap.xml
+        self::generate_sitemap_file();
+    }
+
     /**
      * Подключение стилей
      */
@@ -245,6 +301,15 @@ class HTML_Site_Map_Generator {
             'html_site_map_generator_id_section'
         );
         
+        // НОВОЕ ПОЛЕ: Категории для показа записей
+        add_settings_field(
+            'posts_from_categories',
+            __('Показывать записи только из категорий (ID)', 'html-site-map-generator'),
+            array(__CLASS__, 'posts_from_categories_callback'),
+            'html_site_map_generator_settings',
+            'html_site_map_generator_id_section'
+        );
+
         // Дополнительные настройки
         add_settings_field(
             'orderby',
@@ -297,33 +362,9 @@ class HTML_Site_Map_Generator {
         );
         
         add_settings_field(
-            'xml_include_posts',
-            __('Включить записи в XML', 'html-site-map-generator'),
-            array(__CLASS__, 'xml_include_posts_callback'),
-            'html_site_map_generator_settings',
-            'html_site_map_generator_xml_section'
-        );
-        
-        add_settings_field(
-            'xml_include_pages',
-            __('Включить страницы в XML', 'html-site-map-generator'),
-            array(__CLASS__, 'xml_include_pages_callback'),
-            'html_site_map_generator_settings',
-            'html_site_map_generator_xml_section'
-        );
-        
-        add_settings_field(
-            'xml_include_categories',
-            __('Включить категории в XML', 'html-site-map-generator'),
-            array(__CLASS__, 'xml_include_categories_callback'),
-            'html_site_map_generator_settings',
-            'html_site_map_generator_xml_section'
-        );
-        
-        add_settings_field(
-            'xml_include_custom_post_types',
-            __('Включить произвольные типы записей в XML', 'html-site-map-generator'),
-            array(__CLASS__, 'xml_include_custom_post_types_callback'),
+            'xml_auto_update',
+            __('Автообновление XML карты', 'html-site-map-generator'),
+            array(__CLASS__, 'xml_auto_update_callback'),
             'html_site_map_generator_settings',
             'html_site_map_generator_xml_section'
         );
@@ -344,7 +385,7 @@ class HTML_Site_Map_Generator {
             'html_site_map_generator_xml_section'
         );
     }
-    
+
     /**
      * Санитизация опций
      */
@@ -353,8 +394,7 @@ class HTML_Site_Map_Generator {
         $checkbox_fields = array(
             'show_pages', 'show_posts', 'show_categories', 'show_authors', 
             'show_tags', 'show_date', 'show_comments_count',
-            'xml_enabled', 'xml_include_posts', 'xml_include_pages', 
-            'xml_include_categories', 'xml_include_custom_post_types'
+            'xml_enabled', 'xml_auto_update'
         );
         
         foreach ($checkbox_fields as $field) {
@@ -365,6 +405,18 @@ class HTML_Site_Map_Generator {
         $array_fields = array('include_post_types', 'include_taxonomies');
         foreach ($array_fields as $field) {
             $input[$field] = isset($input[$field]) ? (array) $input[$field] : array();
+        }
+        
+        // Для текстовых полей с ID
+        $id_fields = array('exclude_posts', 'include_posts', 'exclude_categories', 'include_categories', 'posts_from_categories');
+        foreach ($id_fields as $field) {
+            if (isset($input[$field])) {
+                // Удаляем все символы кроме цифр и запятых
+                $input[$field] = preg_replace('/[^0-9,]/', '', $input[$field]);
+                // Удаляем лишние запятые
+                $input[$field] = preg_replace('/,+/', ',', $input[$field]);
+                $input[$field] = trim($input[$field], ',');
+            }
         }
         
         return $input;
@@ -399,11 +451,37 @@ class HTML_Site_Map_Generator {
     }
     
     /**
-     * Колбэк секции настроек XML
-     */
-    public static function xml_settings_section_callback() {
-        echo '<p>' . __('Настройки генерации XML карты сайта для поисковых систем. XML карта доступна по адресу:', 'html-site-map-generator') . ' <code>' . home_url('/sitemap.xml') . '</code></p>';
+ * Колбэк секции настроек XML
+ */
+public static function xml_settings_section_callback() {
+    echo '<p>' . __('Настройки генерации XML карты сайта для поисковых систем.', 'html-site-map-generator') . '</p>';
+    echo '<p>' . __('XML карта доступна по адресу:', 'html-site-map-generator') . ' <code>' . home_url('/sitemap.xml') . '</code></p>';
+    
+    // Показываем статус файла
+    if (file_exists(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH)) {
+        $file_size = filesize(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH);
+        $last_generated = get_option('html_sitemap_last_generated');
+        
+        echo '<div class="notice notice-success inline"><p>';
+        echo __('Файл sitemap.xml существует.', 'html-site-map-generator') . ' ';
+        echo __('Размер:', 'html-site-map-generator') . ' ' . size_format($file_size) . '. ';
+        
+        if ($last_generated) {
+            echo __('Обновлен:', 'html-site-map-generator') . ' ' . date_i18n('d.m.Y H:i:s', $last_generated);
+        } else {
+            // Если время нет в опциях, создаем его сейчас
+            $current_time = current_time('timestamp');
+            update_option('html_sitemap_last_generated', $current_time);
+            echo __('Обновлен:', 'html-site-map-generator') . ' ' . date_i18n('d.m.Y H:i:s', $current_time);
+        }
+        
+        echo '</p></div>';
+    } else {
+        echo '<div class="notice notice-warning inline"><p>';
+        echo __('Файл sitemap.xml не существует. Нажмите "Обновить XML карту" для создания.', 'html-site-map-generator');
+        echo '</p></div>';
     }
+}
     
     // Callback функции для полей настроек
     public static function show_pages_callback() {
@@ -463,6 +541,28 @@ class HTML_Site_Map_Generator {
         $value = isset(self::$options['include_categories']) ? self::$options['include_categories'] : '';
         echo '<input type="text" name="html_site_map_generator_options[include_categories]" value="' . esc_attr($value) . '" class="regular-text">';
         echo '<p class="description">' . __('ID категорий через запятую. Показывает только указанные категории. Имеет приоритет над исключением.', 'html-site-map-generator') . '</p>';
+    }
+    
+    /**
+     * Callback для нового поля - категории для показа записей
+     */
+    public static function posts_from_categories_callback() {
+        $value = isset(self::$options['posts_from_categories']) ? self::$options['posts_from_categories'] : '';
+        echo '<input type="text" name="html_site_map_generator_options[posts_from_categories]" value="' . esc_attr($value) . '" class="regular-text">';
+        echo '<p class="description">' . __('ID категорий через запятую. Будут показаны записи только из указанных категорий. Имеет приоритет над другими настройками категорий.', 'html-site-map-generator') . '</p>';
+        
+        // Показываем список категорий для удобства
+        $categories = get_categories(array('hide_empty' => false));
+        if ($categories) {
+            echo '<div style="margin-top: 10px; max-height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; background: #f9f9f9;">';
+            echo '<strong>' . __('Список категорий:', 'html-site-map-generator') . '</strong><br>';
+            foreach ($categories as $category) {
+                echo '<span style="display: inline-block; margin: 2px 5px; font-size: 12px;">';
+                echo esc_html($category->name) . ' (ID: ' . $category->term_id . ')';
+                echo '</span> | ';
+            }
+            echo '</div>';
+        }
     }
     
     public static function orderby_callback() {
@@ -543,24 +643,10 @@ class HTML_Site_Map_Generator {
         echo '<p class="description">' . __('XML карта будет доступна по адресу: ', 'html-site-map-generator') . '<code>' . home_url('/sitemap.xml') . '</code></p>';
     }
     
-    public static function xml_include_posts_callback() {
-        $value = isset(self::$options['xml_include_posts']) ? self::$options['xml_include_posts'] : 'true';
-        echo '<label><input type="checkbox" name="html_site_map_generator_options[xml_include_posts]" value="true" ' . checked($value, 'true', false) . '> ' . __('Включать записи в XML карту', 'html-site-map-generator') . '</label>';
-    }
-    
-    public static function xml_include_pages_callback() {
-        $value = isset(self::$options['xml_include_pages']) ? self::$options['xml_include_pages'] : 'true';
-        echo '<label><input type="checkbox" name="html_site_map_generator_options[xml_include_pages]" value="true" ' . checked($value, 'true', false) . '> ' . __('Включать страницы в XML карту', 'html-site-map-generator') . '</label>';
-    }
-    
-    public static function xml_include_categories_callback() {
-        $value = isset(self::$options['xml_include_categories']) ? self::$options['xml_include_categories'] : 'true';
-        echo '<label><input type="checkbox" name="html_site_map_generator_options[xml_include_categories]" value="true" ' . checked($value, 'true', false) . '> ' . __('Включать категории в XML карту', 'html-site-map-generator') . '</label>';
-    }
-    
-    public static function xml_include_custom_post_types_callback() {
-        $value = isset(self::$options['xml_include_custom_post_types']) ? self::$options['xml_include_custom_post_types'] : 'true';
-        echo '<label><input type="checkbox" name="html_site_map_generator_options[xml_include_custom_post_types]" value="true" ' . checked($value, 'true', false) . '> ' . __('Включать произвольные типы записей в XML карту', 'html-site-map-generator') . '</label>';
+    public static function xml_auto_update_callback() {
+        $value = isset(self::$options['xml_auto_update']) ? self::$options['xml_auto_update'] : 'true';
+        echo '<label><input type="checkbox" name="html_site_map_generator_options[xml_auto_update]" value="true" ' . checked($value, 'true', false) . '> ' . __('Автоматически обновлять XML карту при изменении контента', 'html-site-map-generator') . '</label>';
+        echo '<p class="description">' . __('При создании, редактировании или удалении записей, страниц, категорий.', 'html-site-map-generator') . '</p>';
     }
     
     public static function xml_change_frequency_callback() {
@@ -580,23 +666,23 @@ class HTML_Site_Map_Generator {
             echo '<option value="' . esc_attr($key) . '" ' . selected($value, $key, false) . '>' . esc_html($label) . '</option>';
         }
         echo '</select>';
-        echo '<p class="description">' . __('Частота обновления контента по умолчанию', 'html-site-map-generator') . '</p>';
+        echo '<p class="description">' . __('Частота обновления контента по умолчанию для XML карты', 'html-site-map-generator') . '</p>';
     }
     
     public static function xml_priority_callback() {
         $value = isset(self::$options['xml_priority']) ? self::$options['xml_priority'] : '0.7';
         $options = array(
-            '1.0' => __('1.0 - высший приоритет', 'html-site-map-generator'),
-            '0.9' => __('0.9 - очень высокий', 'html-site-map-generator'),
-            '0.8' => __('0.8 - высокий', 'html-site-map-generator'),
-            '0.7' => __('0.7 - средний', 'html-site-map-generator'),
-            '0.6' => __('0.6 - ниже среднего', 'html-site-map-generator'),
-            '0.5' => __('0.5 - низкий', 'html-site-map-generator'),
-            '0.4' => __('0.4 - очень низкий', 'html-site-map-generator'),
-            '0.3' => __('0.3 - минимальный', 'html-site-map-generator'),
-            '0.2' => __('0.2 - очень минимальный', 'html-site-map-generator'),
-            '0.1' => __('0.1 - наименьший', 'html-site-map-generator'),
-            '0.0' => __('0.0 - не индексировать', 'html-site-map-generator')
+            '1.0' => '1.0 - ' . __('Высший приоритет', 'html-site-map-generator'),
+            '0.9' => '0.9',
+            '0.8' => '0.8',
+            '0.7' => '0.7 - ' . __('Средний приоритет', 'html-site-map-generator'),
+            '0.6' => '0.6',
+            '0.5' => '0.5',
+            '0.4' => '0.4',
+            '0.3' => '0.3',
+            '0.2' => '0.2',
+            '0.1' => '0.1 - ' . __('Низший приоритет', 'html-site-map-generator'),
+            '0.0' => '0.0 - ' . __('Исключить', 'html-site-map-generator')
         );
         
         echo '<select name="html_site_map_generator_options[xml_priority]">';
@@ -604,554 +690,548 @@ class HTML_Site_Map_Generator {
             echo '<option value="' . esc_attr($key) . '" ' . selected($value, $key, false) . '>' . esc_html($label) . '</option>';
         }
         echo '</select>';
-        echo '<p class="description">' . __('Приоритет индексации по умолчанию', 'html-site-map-generator') . '</p>';
+        echo '<p class="description">' . __('Приоритет по умолчанию для XML карты', 'html-site-map-generator') . '</p>';
     }
     
     /**
      * Страница настроек
      */
     public static function settings_page() {
+        // Обработка ручного обновления sitemap.xml
+        if (isset($_POST['update_sitemap']) && check_admin_referer('update_sitemap_action', 'update_sitemap_nonce')) {
+            $result = self::generate_sitemap_file();
+            if ($result) {
+                echo '<div class="notice notice-success is-dismissible"><p>' . __('XML карта сайта успешно обновлена!', 'html-site-map-generator') . '</p></div>';
+            } else {
+                echo '<div class="notice notice-error is-dismissible"><p>' . __('Ошибка при обновлении XML карты сайта. Проверьте права на запись файлов.', 'html-site-map-generator') . '</p></div>';
+            }
+        }
+        
+        // Обработка удаления sitemap.xml
+        if (isset($_POST['delete_sitemap']) && check_admin_referer('delete_sitemap_action', 'delete_sitemap_nonce')) {
+            if (file_exists(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH)) {
+                $result = unlink(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH);
+                if ($result) {
+                    echo '<div class="notice notice-success is-dismissible"><p>' . __('Файл sitemap.xml успешно удален!', 'html-site-map-generator') . '</p></div>';
+                } else {
+                    echo '<div class="notice notice-error is-dismissible"><p>' . __('Ошибка при удалении файла sitemap.xml.', 'html-site-map-generator') . '</p></div>';
+                }
+            }
+        }
         ?>
         <div class="wrap">
-            <h1><?php echo esc_html__('Карта сайта - Настройки', 'html-site-map-generator'); ?></h1>
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
             
-            <form action='options.php' method='post'>
+            <?php
+            // Проверяем права пользователя
+            if (!current_user_can('manage_options')) {
+                wp_die(__('У вас недостаточно прав для доступа к этой странице.', 'html-site-map-generator'));
+            }
+            ?>
+            
+            <div class="card">
+                <h2><?php _e('Управление XML картой сайта', 'html-site-map-generator'); ?></h2>
+                
+                <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                    <form method="post" style="margin: 0;">
+                        <?php wp_nonce_field('update_sitemap_action', 'update_sitemap_nonce'); ?>
+                        <button type="submit" name="update_sitemap" class="button button-primary">
+                            <?php _e('Обновить XML карту', 'html-site-map-generator'); ?>
+                        </button>
+                    </form>
+                    
+                    <?php if (file_exists(HTML_SITE_MAP_GENERATOR_SITEMAP_PATH)): ?>
+                    <form method="post" style="margin: 0;">
+                        <?php wp_nonce_field('delete_sitemap_action', 'delete_sitemap_nonce'); ?>
+                        <button type="submit" name="delete_sitemap" class="button button-secondary" onclick="return confirm('<?php _e('Вы уверены что хотите удалить файл sitemap.xml?', 'html-site-map-generator'); ?>')">
+                            <?php _e('Удалить XML файл', 'html-site-map-generator'); ?>
+                        </button>
+                    </form>
+                    <?php endif; ?>
+                    
+                    <a href="<?php echo home_url('/sitemap.xml'); ?>" target="_blank" class="button">
+                        <?php _e('Просмотреть XML', 'html-site-map-generator'); ?>
+                    </a>
+                </div>
+                
+                <p><strong><?php _e('Использование:', 'html-site-map-generator'); ?></strong></p>
+                <p><?php _e('Для вывода HTML карты сайта используйте шорткод:', 'html-site-map-generator'); ?></p>
+                <code>[html_sitemap]</code>
+                
+                <p><?php _e('XML карта сайта доступна по адресу:', 'html-site-map-generator'); ?></p>
+                <code><?php echo home_url('/sitemap.xml'); ?></code>
+            </div>
+            
+            <form action="options.php" method="post">
                 <?php
                 settings_fields('html_site_map_generator_settings');
                 do_settings_sections('html_site_map_generator_settings');
-                submit_button();
+                submit_button(__('Сохранить настройки', 'html-site-map-generator'));
                 ?>
             </form>
-            
-            <div class="card">
-                <h2><?php echo esc_html__('Использование', 'html-site-map-generator'); ?></h2>
-                
-                <h3><?php echo esc_html__('HTML карта сайта:', 'html-site-map-generator'); ?></h3>
-                <p><?php echo esc_html__('Для вставки HTML карты сайта на страницу используйте шорткод:', 'html-site-map-generator'); ?></p>
-                <code>[html_sitemap]</code>
-                
-                <h3><?php echo esc_html__('XML карта сайта:', 'html-site-map-generator'); ?></h3>
-                <p><?php echo esc_html__('XML карта сайта доступна по прямой ссылке для поисковых систем:', 'html-site-map-generator'); ?></p>
-                <code><?php echo home_url('/sitemap.xml'); ?></code>
-                
-                <p><?php echo esc_html__('Добавьте эту ссылку в файл robots.txt и в панели вебмастеров поисковых систем.', 'html-site-map-generator'); ?></p>
-                
-                <h4><?php echo esc_html__('Пример для robots.txt:', 'html-site-map-generator'); ?></h4>
-                <code>Sitemap: <?php echo home_url('/sitemap.xml'); ?></code>
-            </div>
         </div>
         <?php
     }
     
     /**
-     * Генерация HTML карты сайта
-     */
-    public static function generate_html_sitemap() {
-        // Используем настройки из админки
-        $options = self::$options;
-        
-        // Устанавливаем значения по умолчанию для всех опций
-        $defaults = array(
-            'show_pages' => 'true',
-            'show_posts' => 'true',
-            'show_categories' => 'true',
-            'show_authors' => 'false',
-            'show_tags' => 'false',
-            'show_date' => 'false',
-            'show_comments_count' => 'false',
-            'exclude_posts' => '',
-            'include_posts' => '',
-            'exclude_categories' => '',
-            'include_categories' => '',
-            'orderby' => 'title',
-            'order' => 'ASC',
-            'posts_per_section' => '0',
-            'include_post_types' => array(),
-            'include_taxonomies' => array()
-        );
-        
-        // Объединяем с настройками из базы данных
-        $options = wp_parse_args($options, $defaults);
-        
-        // Преобразуем строковые значения в boolean
-        $show_pages = ($options['show_pages'] === 'true');
-        $show_posts = ($options['show_posts'] === 'true');
-        $show_categories = ($options['show_categories'] === 'true');
-        $show_authors = ($options['show_authors'] === 'true');
-        $show_tags = ($options['show_tags'] === 'true');
-        $show_date = ($options['show_date'] === 'true');
-        $show_comments_count = ($options['show_comments_count'] === 'true');
-        
-        // Обрабатываем ID
-        $exclude_posts = !empty($options['exclude_posts']) ? array_map('intval', explode(',', $options['exclude_posts'])) : array();
-        $include_posts = !empty($options['include_posts']) ? array_map('intval', explode(',', $options['include_posts'])) : array();
-        $exclude_categories = !empty($options['exclude_categories']) ? array_map('intval', explode(',', $options['exclude_categories'])) : array();
-        $include_categories = !empty($options['include_categories']) ? array_map('intval', explode(',', $options['include_categories'])) : array();
-        
-        ob_start();
-        
-        echo '<div class="html-sitemap">';
-        
-        // Страницы
-        if ($show_pages) {
-            self::display_pages($options, $exclude_posts, $include_posts);
-        }
-        
-        // Записи по категориям
-        if ($show_posts) {
-            self::display_posts_by_category($options, $exclude_posts, $include_posts, $exclude_categories, $include_categories);
-        }
-        
-        // Категории
-        if ($show_categories) {
-            self::display_categories($options, $exclude_categories, $include_categories);
-        }
-        
-        // Авторы
-        if ($show_authors) {
-            self::display_authors();
-        }
-        
-        // Метки
-        if ($show_tags) {
-            self::display_tags();
-        }
-        
-        // Произвольные типы записей
-        self::display_custom_post_types($options, $exclude_posts, $include_posts);
-        
-        // Произвольные таксономии
-        self::display_custom_taxonomies($options);
-        
-        echo '</div>';
-        
-        return ob_get_clean();
+ * Генерация HTML карты сайта
+ */
+public static function generate_html_sitemap($atts = array()) {
+    // Получаем настройки
+    $options = get_option('html_site_map_generator_options', array());
+    
+    // Обрабатываем атрибуты шорткода
+    $atts = shortcode_atts(array(
+        'show_pages' => isset($options['show_pages']) ? $options['show_pages'] : 'true',
+        'show_posts' => isset($options['show_posts']) ? $options['show_posts'] : 'true',
+        'show_categories' => isset($options['show_categories']) ? $options['show_categories'] : 'true',
+        'show_authors' => isset($options['show_authors']) ? $options['show_authors'] : 'false',
+        'show_tags' => isset($options['show_tags']) ? $options['show_tags'] : 'false',
+        'show_date' => isset($options['show_date']) ? $options['show_date'] : 'false',
+        'show_comments_count' => isset($options['show_comments_count']) ? $options['show_comments_count'] : 'false',
+        'exclude_posts' => isset($options['exclude_posts']) ? $options['exclude_posts'] : '',
+        'include_posts' => isset($options['include_posts']) ? $options['include_posts'] : '',
+        'exclude_categories' => isset($options['exclude_categories']) ? $options['exclude_categories'] : '',
+        'include_categories' => isset($options['include_categories']) ? $options['include_categories'] : '',
+        'posts_from_categories' => isset($options['posts_from_categories']) ? $options['posts_from_categories'] : '',
+        'orderby' => isset($options['orderby']) ? $options['orderby'] : 'title',
+        'order' => isset($options['order']) ? $options['order'] : 'ASC',
+        'posts_per_section' => isset($options['posts_per_section']) ? $options['posts_per_section'] : '0',
+        'include_post_types' => isset($options['include_post_types']) ? $options['include_post_types'] : array(),
+        'include_taxonomies' => isset($options['include_taxonomies']) ? $options['include_taxonomies'] : array(),
+    ), $atts);
+    
+    // Нормализуем значения
+    foreach ($atts as $key => $value) {
+        if ($value === 'true') $atts[$key] = 'true';
+        if ($value === 'false') $atts[$key] = 'false';
+        if ($value === '1') $atts[$key] = 'true';
+        if ($value === '0') $atts[$key] = 'false';
     }
     
-    /**
-     * Генерация содержимого XML карты
-     */
-    private static function generate_xml_content() {
-        $options = self::$options;
-        
-        // Устанавливаем значения по умолчанию
-        $defaults = array(
-            'xml_include_posts' => 'true',
-            'xml_include_pages' => 'true',
-            'xml_include_categories' => 'true',
-            'xml_include_custom_post_types' => 'true',
-            'xml_change_frequency' => 'weekly',
-            'xml_priority' => '0.7'
-        );
-        
-        $options = wp_parse_args($options, $defaults);
-        
-        $xml = '<?xml version="1.0" encoding="UTF-8"?>';
-        $xml .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">';
-        
-        // Главная страница
-        $xml .= self::generate_xml_url(home_url(), $options['xml_change_frequency'], '1.0');
-        
-        // Страницы
-        if ($options['xml_include_pages'] === 'true') {
-            $pages = get_pages(array('post_status' => 'publish'));
-            foreach ($pages as $page) {
-                $xml .= self::generate_xml_url(get_permalink($page->ID), $options['xml_change_frequency'], '0.8');
-            }
-        }
-        
-        // Записи
-        if ($options['xml_include_posts'] === 'true') {
-            $posts = get_posts(array('post_type' => 'post', 'numberposts' => -1, 'post_status' => 'publish'));
-            foreach ($posts as $post) {
-                $xml .= self::generate_xml_url(get_permalink($post->ID), $options['xml_change_frequency'], $options['xml_priority']);
-            }
-        }
-        
-        // Категории
-        if ($options['xml_include_categories'] === 'true') {
-            $categories = get_categories(array('hide_empty' => true));
-            foreach ($categories as $category) {
-                $xml .= self::generate_xml_url(get_category_link($category->term_id), 'weekly', '0.6');
-            }
-        }
-        
-        // Произвольные типы записей
-        if ($options['xml_include_custom_post_types'] === 'true') {
-            $post_types = get_post_types(array('public' => true, '_builtin' => false), 'objects');
-            foreach ($post_types as $post_type) {
-                $posts = get_posts(array('post_type' => $post_type->name, 'numberposts' => -1, 'post_status' => 'publish'));
-                foreach ($posts as $post) {
-                    $xml .= self::generate_xml_url(get_permalink($post->ID), $options['xml_change_frequency'], '0.5');
-                }
-            }
-        }
-        
-        $xml .= '</urlset>';
-        
-        return $xml;
-    }
+    // Обрабатываем ID
+    $exclude_posts = !empty($atts['exclude_posts']) ? array_map('intval', explode(',', $atts['exclude_posts'])) : array();
+    $include_posts = !empty($atts['include_posts']) ? array_map('intval', explode(',', $atts['include_posts'])) : array();
+    $exclude_categories = !empty($atts['exclude_categories']) ? array_map('intval', explode(',', $atts['exclude_categories'])) : array();
+    $include_categories = !empty($atts['include_categories']) ? array_map('intval', explode(',', $atts['include_categories'])) : array();
+    $posts_from_categories = !empty($atts['posts_from_categories']) ? array_map('intval', explode(',', $atts['posts_from_categories'])) : array();
     
-    /**
-     * Генерация отдельного URL для XML
-     */
-    private static function generate_xml_url($url, $change_frequency, $priority) {
-        $url = esc_url($url);
-        
-        $xml = '<url>';
-        $xml .= '<loc>' . $url . '</loc>';
-        $xml .= '<lastmod>' . gmdate('Y-m-d\TH:i:s+00:00') . '</lastmod>';
-        $xml .= '<changefreq>' . $change_frequency . '</changefreq>';
-        $xml .= '<priority>' . $priority . '</priority>';
-        $xml .= '</url>';
-        
-        return $xml;
-    }
-    
-    /**
-     * Отображение страниц
-     */
-    private static function display_pages($options, $exclude_posts, $include_posts) {
-        $orderby = isset($options['orderby']) ? $options['orderby'] : 'title';
-        $order = isset($options['order']) ? $options['order'] : 'ASC';
-        $show_date = isset($options['show_date']) ? ($options['show_date'] === 'true') : false;
-        
-        $args = array(
-            'sort_column' => $orderby,
-            'sort_order' => $order
-        );
-        
-        // Если указаны конкретные ID для включения
-        if (!empty($include_posts)) {
-            $args['include'] = $include_posts;
-        } else if (!empty($exclude_posts)) {
-            $args['exclude'] = $exclude_posts;
-        }
-        
-        $pages = get_pages($args);
-        
-        if ($pages) {
-            echo '<div class="sitemap-section pages-section">';
-            echo '<h2 class="sitemap-title">' . __('Страницы', 'html-site-map-generator') . '</h2>';
-            echo '<ul class="sitemap-list pages-list">';
-            
-            foreach ($pages as $page) {
-                if ($page->post_status === 'publish') {
-                    echo '<li class="sitemap-item page-item">';
-                    echo '<a href="' . get_permalink($page->ID) . '" class="sitemap-link">';
-                    echo apply_filters('the_title', $page->post_title);
-                    
-                    if ($show_date) {
-                        echo ' <span class="post-date">(' . get_the_date('', $page->ID) . ')</span>';
-                    }
-                    
-                    echo '</a>';
-                    echo '</li>';
-                }
+    // Получаем информацию о категориях для заголовков
+    $categories_info = array();
+    if (!empty($posts_from_categories)) {
+        foreach ($posts_from_categories as $category_id) {
+            $category = get_category($category_id);
+            if ($category && !is_wp_error($category)) {
+                $categories_info[$category_id] = $category->name;
             }
-            
-            echo '</ul>';
-            echo '</div>';
         }
     }
     
-    /**
-     * Отображение записей по категориям
-     */
-    private static function display_posts_by_category($options, $exclude_posts, $include_posts, $exclude_categories, $include_categories) {
-        $orderby = isset($options['orderby']) ? $options['orderby'] : 'title';
-        $order = isset($options['order']) ? $options['order'] : 'ASC';
-        $posts_per_section = isset($options['posts_per_section']) ? intval($options['posts_per_section']) : 0;
-        $show_date = isset($options['show_date']) ? ($options['show_date'] === 'true') : false;
-        $show_comments = isset($options['show_comments_count']) ? ($options['show_comments_count'] === 'true') : false;
+    // Начинаем вывод
+    ob_start();
+    ?>
+    <div class="html-sitemap-container">
         
-        $cat_args = array(
-            'hide_empty' => true,
-            'orderby' => $orderby,
-            'order' => $order
-        );
-        
-        // Если указаны конкретные ID категорий для включения
-        if (!empty($include_categories)) {
-            $cat_args['include'] = $include_categories;
-        } else if (!empty($exclude_categories)) {
-            $cat_args['exclude'] = $exclude_categories;
-        }
-        
-        $categories = get_categories($cat_args);
-        
-        if ($categories) {
-            echo '<div class="sitemap-section posts-section">';
-            echo '<h2 class="sitemap-title">' . __('Записи по категориям', 'html-site-map-generator') . '</h2>';
-            
-            foreach ($categories as $category) {
-                $posts_args = array(
-                    'category' => $category->term_id,
-                    'post_type' => 'post',
-                    'numberposts' => $posts_per_section > 0 ? $posts_per_section : -1,
-                    'orderby' => $orderby,
-                    'order' => $order,
-                    'post_status' => 'publish'
+        <?php if ($atts['show_pages'] === 'true'): ?>
+        <div class="sitemap-section sitemap-pages">
+            <h2 class="sitemap-section-title"><?php _e('Страницы', 'html-site-map-generator'); ?></h2>
+            <ul class="sitemap-list">
+                <?php
+                $pages_args = array(
+                    'post_type' => 'page',
+                    'post_status' => 'publish',
+                    'numberposts' => -1,
+                    'orderby' => $atts['orderby'],
+                    'order' => $atts['order'],
+                    'exclude' => $exclude_posts
                 );
                 
-                // Если указаны конкретные ID записей для включения
+                // Если указаны конкретные ID для включения
                 if (!empty($include_posts)) {
+                    $pages_args['include'] = $include_posts;
+                    unset($pages_args['exclude']);
+                }
+                
+                $pages = get_posts($pages_args);
+                
+                foreach ($pages as $page) {
+                    echo '<li class="sitemap-item">';
+                    echo '<a href="' . get_permalink($page->ID) . '" class="sitemap-link">' . esc_html($page->post_title) . '</a>';
+                    
+                    if ($atts['show_date'] === 'true') {
+                        echo ' <span class="sitemap-date">(' . get_the_date('', $page->ID) . ')</span>';
+                    }
+                    
+                    if ($atts['show_comments_count'] === 'true') {
+                        $comments_count = get_comments_number($page->ID);
+                        echo ' <span class="sitemap-comments">(' . $comments_count . ')</span>';
+                    }
+                    
+                    echo '</li>';
+                }
+                ?>
+            </ul>
+        </div>
+        <?php endif; ?>
+        
+        <?php if ($atts['show_posts'] === 'true'): ?>
+        <div class="sitemap-section sitemap-posts">
+            <?php
+            // ОПРЕДЕЛЯЕМ ЗАГОЛОВОК ДЛЯ РАЗДЕЛА ЗАПИСЕЙ
+            $posts_title = __('Записи', 'html-site-map-generator');
+            
+            // Если указаны категории для показа записей и есть только одна категория
+            if (!empty($posts_from_categories) && count($posts_from_categories) === 1) {
+                $first_category_id = $posts_from_categories[0];
+                if (isset($categories_info[$first_category_id])) {
+                    $posts_title = $categories_info[$first_category_id];
+                }
+            }
+            // Если указано несколько категорий
+            elseif (!empty($posts_from_categories) && count($posts_from_categories) > 1) {
+                $category_names = array();
+                foreach ($posts_from_categories as $category_id) {
+                    if (isset($categories_info[$category_id])) {
+                        $category_names[] = $categories_info[$category_id];
+                    }
+                }
+                if (!empty($category_names)) {
+                    $posts_title = implode(', ', $category_names);
+                }
+            }
+            ?>
+            <h2 class="sitemap-section-title"><?php echo esc_html($posts_title); ?></h2>
+            <ul class="sitemap-list">
+                <?php
+                // ОСНОВНАЯ ЛОГИКА ДЛЯ ЗАПИСЕЙ
+                $posts_args = array(
+                    'post_type' => 'post',
+                    'post_status' => 'publish',
+                    'numberposts' => $atts['posts_per_section'] > 0 ? intval($atts['posts_per_section']) : -1,
+                    'orderby' => $atts['orderby'],
+                    'order' => $atts['order'],
+                );
+                
+                // ЕСЛИ УКАЗАНЫ КАТЕГОРИИ ДЛЯ ПОКАЗА ЗАПИСЕЙ - используем их
+                if (!empty($posts_from_categories)) {
+                    $posts_args['category__in'] = $posts_from_categories;
+                }
+                // Иначе если указаны конкретные ID записей для включения
+                else if (!empty($include_posts)) {
                     $posts_args['include'] = $include_posts;
-                } else if (!empty($exclude_posts)) {
+                }
+                // Иначе если указаны ID для исключения
+                else if (!empty($exclude_posts)) {
                     $posts_args['exclude'] = $exclude_posts;
                 }
                 
                 $posts = get_posts($posts_args);
                 
-                if ($posts) {
-                    echo '<div class="category-group">';
-                    echo '<h3 class="category-title">';
-                    echo '<a href="' . get_category_link($category->term_id) . '">';
-                    echo $category->name;
-                    echo '</a>';
-                    echo ' <span class="post-count">(' . count($posts) . ')</span>';
-                    echo '</h3>';
+                foreach ($posts as $post) {
+                    // Дополнительная проверка исключений (на случай если category__in не сработал)
+                    if (!empty($exclude_posts) && in_array($post->ID, $exclude_posts)) {
+                        continue;
+                    }
                     
-                    echo '<ul class="sitemap-list posts-list">';
-                    foreach ($posts as $post) {
-                        echo '<li class="sitemap-item post-item">';
-                        echo '<a href="' . get_permalink($post->ID) . '" class="sitemap-link">';
-                        echo apply_filters('the_title', $post->post_title);
+                    echo '<li class="sitemap-item">';
+                    echo '<a href="' . get_permalink($post->ID) . '" class="sitemap-link">' . esc_html($post->post_title) . '</a>';
+                    
+                    if ($atts['show_date'] === 'true') {
+                        echo ' <span class="sitemap-date">(' . get_the_date('', $post->ID) . ')</span>';
+                    }
+                    
+                    if ($atts['show_comments_count'] === 'true') {
+                        $comments_count = get_comments_number($post->ID);
+                        echo ' <span class="sitemap-comments">(' . $comments_count . ')</span>';
+                    }
+                    
+                    echo '</li>';
+                }
+                ?>
+            </ul>
+        </div>
+        <?php endif; ?>
+        
+        <?php if ($atts['show_categories'] === 'true'): ?>
+        <div class="sitemap-section sitemap-categories">
+            <h2 class="sitemap-section-title"><?php _e('Категории', 'html-site-map-generator'); ?></h2>
+            <ul class="sitemap-list">
+                <?php
+                $categories_args = array(
+                    'hide_empty' => true,
+                );
+                
+                // Если указаны категории для показа записей - показываем только их
+                if (!empty($posts_from_categories)) {
+                    $categories_args['include'] = $posts_from_categories;
+                }
+                // Иначе если указаны конкретные ID категорий для включения
+                else if (!empty($include_categories)) {
+                    $categories_args['include'] = $include_categories;
+                }
+                // Иначе если указаны ID для исключения
+                else if (!empty($exclude_categories)) {
+                    $categories_args['exclude'] = $exclude_categories;
+                }
+                
+                $categories = get_categories($categories_args);
+                
+                foreach ($categories as $category) {
+                    echo '<li class="sitemap-item">';
+                    echo '<a href="' . get_category_link($category->term_id) . '" class="sitemap-link">' . esc_html($category->name) . '</a>';
+                    
+                    if ($atts['show_comments_count'] === 'true') {
+                        echo ' <span class="sitemap-comments">(' . $category->count . ')</span>';
+                    }
+                    
+                    echo '</li>';
+                }
+                ?>
+            </ul>
+        </div>
+        <?php endif; ?>
+        
+        <?php
+        // Произвольные типы записей
+        if (!empty($atts['include_post_types'])) {
+            foreach ($atts['include_post_types'] as $post_type) {
+                if (post_type_exists($post_type)) {
+                    $post_type_obj = get_post_type_object($post_type);
+                    
+                    echo '<div class="sitemap-section sitemap-custom-post-type sitemap-' . esc_attr($post_type) . '">';
+                    echo '<h2 class="sitemap-section-title">' . esc_html($post_type_obj->labels->name) . '</h2>';
+                    echo '<ul class="sitemap-list">';
+                    
+                    $custom_posts_args = array(
+                        'post_type' => $post_type,
+                        'post_status' => 'publish',
+                        'numberposts' => $atts['posts_per_section'] > 0 ? intval($atts['posts_per_section']) : -1,
+                        'orderby' => $atts['orderby'],
+                        'order' => $atts['order'],
+                    );
+                    
+                    // Если указаны конкретные ID для включения
+                    if (!empty($include_posts)) {
+                        $custom_posts_args['include'] = $include_posts;
+                    }
+                    // Иначе если указаны ID для исключения
+                    else if (!empty($exclude_posts)) {
+                        $custom_posts_args['exclude'] = $exclude_posts;
+                    }
+                    
+                    $custom_posts = get_posts($custom_posts_args);
+                    
+                    foreach ($custom_posts as $custom_post) {
+                        echo '<li class="sitemap-item">';
+                        echo '<a href="' . get_permalink($custom_post->ID) . '" class="sitemap-link">' . esc_html($custom_post->post_title) . '</a>';
                         
-                        if ($show_date) {
-                            echo ' <span class="post-date">(' . get_the_date('', $post->ID) . ')</span>';
+                        if ($atts['show_date'] === 'true') {
+                            echo ' <span class="sitemap-date">(' . get_the_date('', $custom_post->ID) . ')</span>';
                         }
                         
-                        if ($show_comments) {
-                            $comments_count = get_comments_number($post->ID);
-                            echo ' <span class="comments-count">[' . $comments_count . ']</span>';
+                        if ($atts['show_comments_count'] === 'true') {
+                            $comments_count = get_comments_number($custom_post->ID);
+                            echo ' <span class="sitemap-comments">(' . $comments_count . ')</span>';
                         }
                         
-                        echo '</a>';
                         echo '</li>';
                     }
+                    
                     echo '</ul>';
                     echo '</div>';
                 }
             }
-            
-            echo '</div>';
         }
-    }
+        ?>
+        
+    </div>
+    <?php
     
+    return ob_get_clean();
+}
+
     /**
-     * Отображение категорий
+     * Генерация содержимого для XML карты
      */
-    private static function display_categories($options, $exclude_categories, $include_categories) {
-        $orderby = isset($options['orderby']) ? $options['orderby'] : 'title';
-        $order = isset($options['order']) ? $options['order'] : 'ASC';
+    public static function generate_xml_content() {
+        // Получаем настройки
+        $options = get_option('html_site_map_generator_options', array());
         
-        $args = array(
-            'hide_empty' => true,
-            'orderby' => $orderby,
-            'order' => $order
-        );
+        // Используем те же параметры что и для HTML карты
+        $show_pages = isset($options['show_pages']) ? $options['show_pages'] : 'true';
+        $show_posts = isset($options['show_posts']) ? $options['show_posts'] : 'true';
+        $show_categories = isset($options['show_categories']) ? $options['show_categories'] : 'true';
+        $exclude_posts = isset($options['exclude_posts']) ? $options['exclude_posts'] : '';
+        $include_posts = isset($options['include_posts']) ? $options['include_posts'] : '';
+        $exclude_categories = isset($options['exclude_categories']) ? $options['exclude_categories'] : '';
+        $include_categories = isset($options['include_categories']) ? $options['include_categories'] : '';
+        $posts_from_categories = isset($options['posts_from_categories']) ? $options['posts_from_categories'] : '';
+        $include_post_types = isset($options['include_post_types']) ? $options['include_post_types'] : array();
+        $include_taxonomies = isset($options['include_taxonomies']) ? $options['include_taxonomies'] : array();
+        $xml_change_frequency = isset($options['xml_change_frequency']) ? $options['xml_change_frequency'] : 'weekly';
+        $xml_priority = isset($options['xml_priority']) ? $options['xml_priority'] : '0.7';
         
-        // Если указаны конкретные ID категорий для включения
-        if (!empty($include_categories)) {
-            $args['include'] = $include_categories;
-        } else if (!empty($exclude_categories)) {
-            $args['exclude'] = $exclude_categories;
+        // Обрабатываем ID
+        $exclude_posts_ids = !empty($exclude_posts) ? array_map('intval', explode(',', $exclude_posts)) : array();
+        $include_posts_ids = !empty($include_posts) ? array_map('intval', explode(',', $include_posts)) : array();
+        $exclude_categories_ids = !empty($exclude_categories) ? array_map('intval', explode(',', $exclude_categories)) : array();
+        $include_categories_ids = !empty($include_categories) ? array_map('intval', explode(',', $include_categories)) : array();
+        $posts_from_categories_ids = !empty($posts_from_categories) ? array_map('intval', explode(',', $posts_from_categories)) : array();
+        
+        // Начинаем вывод XML
+        $output = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+        $output .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . "\n";
+        
+        // Главная страница
+        $output .= self::generate_xml_url_entry(home_url('/'), '1.0', $xml_change_frequency);
+        
+        // Страницы
+        if ($show_pages === 'true') {
+            $pages_args = array(
+                'post_type' => 'page',
+                'post_status' => 'publish',
+                'numberposts' => -1,
+                'exclude' => $exclude_posts_ids
+            );
+            
+            if (!empty($include_posts_ids)) {
+                $pages_args['include'] = $include_posts_ids;
+                unset($pages_args['exclude']);
+            }
+            
+            $pages = get_posts($pages_args);
+            
+            foreach ($pages as $page) {
+                $output .= self::generate_xml_url_entry(
+                    get_permalink($page->ID),
+                    $xml_priority,
+                    $xml_change_frequency,
+                    get_the_modified_time('Y-m-d\TH:i:s+00:00', $page->ID)
+                );
+            }
         }
         
-        $categories = get_categories($args);
+        // Записи (СИНХРОНИЗИРОВАНО С HTML КАРТОЙ)
+        if ($show_posts === 'true') {
+            $posts_args = array(
+                'post_type' => 'post',
+                'post_status' => 'publish',
+                'numberposts' => -1,
+            );
+            
+            // ЕСЛИ УКАЗАНЫ КАТЕГОРИИ ДЛЯ ПОКАЗА ЗАПИСЕЙ - используем их
+            if (!empty($posts_from_categories_ids)) {
+                $posts_args['category__in'] = $posts_from_categories_ids;
+            }
+            // Иначе если указаны конкретные ID записей для включения
+            else if (!empty($include_posts_ids)) {
+                $posts_args['include'] = $include_posts_ids;
+            }
+            // Иначе если указаны ID для исключения
+            else if (!empty($exclude_posts_ids)) {
+                $posts_args['exclude'] = $exclude_posts_ids;
+            }
+            
+            $posts = get_posts($posts_args);
+            
+            foreach ($posts as $post) {
+                // Дополнительная проверка исключений
+                if (!empty($exclude_posts_ids) && in_array($post->ID, $exclude_posts_ids)) {
+                    continue;
+                }
+                
+                $output .= self::generate_xml_url_entry(
+                    get_permalink($post->ID),
+                    $xml_priority,
+                    $xml_change_frequency,
+                    get_the_modified_time('Y-m-d\TH:i:s+00:00', $post->ID)
+                );
+            }
+        }
         
-        if ($categories) {
-            echo '<div class="sitemap-section categories-section">';
-            echo '<h2 class="sitemap-title">' . __('Категории', 'html-site-map-generator') . '</h2>';
-            echo '<ul class="sitemap-list categories-list">';
+        // Категории (СИНХРОНИЗИРОВАНО С HTML КАРТОЙ)
+        if ($show_categories === 'true') {
+            $categories_args = array(
+                'hide_empty' => true,
+            );
+            
+            // Если указаны категории для показа записей - показываем только их
+            if (!empty($posts_from_categories_ids)) {
+                $categories_args['include'] = $posts_from_categories_ids;
+            }
+            // Иначе если указаны конкретные ID категорий для включения
+            else if (!empty($include_categories_ids)) {
+                $categories_args['include'] = $include_categories_ids;
+            }
+            // Иначе если указаны ID для исключения
+            else if (!empty($exclude_categories_ids)) {
+                $categories_args['exclude'] = $exclude_categories_ids;
+            }
+            
+            $categories = get_categories($categories_args);
             
             foreach ($categories as $category) {
-                echo '<li class="sitemap-item category-item">';
-                echo '<a href="' . get_category_link($category->term_id) . '" class="sitemap-link">';
-                echo $category->name;
-                echo ' <span class="post-count">(' . $category->count . ')</span>';
-                echo '</a>';
-                echo '</li>';
+                $output .= self::generate_xml_url_entry(
+                    get_category_link($category->term_id),
+                    '0.6', // Более низкий приоритет для категорий
+                    'weekly'
+                );
             }
-            
-            echo '</ul>';
-            echo '</div>';
         }
-    }
-    
-    /**
-     * Отображение авторов
-     */
-    private static function display_authors() {
-        $authors = get_users(array(
-            'orderby' => 'post_count',
-            'order' => 'DESC',
-            'who' => 'authors'
-        ));
         
-        if ($authors) {
-            echo '<div class="sitemap-section authors-section">';
-            echo '<h2 class="sitemap-title">' . __('Авторы', 'html-site-map-generator') . '</h2>';
-            echo '<ul class="sitemap-list authors-list">';
-            
-            foreach ($authors as $author) {
-                $post_count = count_user_posts($author->ID);
-                if ($post_count > 0) {
-                    echo '<li class="sitemap-item author-item">';
-                    echo '<a href="' . get_author_posts_url($author->ID) . '" class="sitemap-link">';
-                    echo $author->display_name;
-                    echo ' <span class="post-count">(' . $post_count . ')</span>';
-                    echo '</a>';
-                    echo '</li>';
-                }
-            }
-            
-            echo '</ul>';
-            echo '</div>';
-        }
-    }
-    
-    /**
-     * Отображение меток
-     */
-    private static function display_tags() {
-        $tags = get_tags(array(
-            'hide_empty' => true,
-            'orderby' => 'count',
-            'order' => 'DESC'
-        ));
-        
-        if ($tags) {
-            echo '<div class="sitemap-section tags-section">';
-            echo '<h2 class="sitemap-title">' . __('Метки', 'html-site-map-generator') . '</h2>';
-            echo '<ul class="sitemap-list tags-list">';
-            
-            foreach ($tags as $tag) {
-                echo '<li class="sitemap-item tag-item">';
-                echo '<a href="' . get_tag_link($tag->term_id) . '" class="sitemap-link">';
-                echo $tag->name;
-                echo ' <span class="post-count">(' . $tag->count . ')</span>';
-                echo '</a>';
-                echo '</li>';
-            }
-            
-            echo '</ul>';
-            echo '</div>';
-        }
-    }
-    
-    /**
-     * Отображение произвольных типов записей
-     */
-    private static function display_custom_post_types($options, $exclude_posts, $include_posts) {
-        $orderby = isset($options['orderby']) ? $options['orderby'] : 'title';
-        $order = isset($options['order']) ? $options['order'] : 'ASC';
-        $posts_per_section = isset($options['posts_per_section']) ? intval($options['posts_per_section']) : 0;
-        $show_date = isset($options['show_date']) ? ($options['show_date'] === 'true') : false;
-        $show_comments = isset($options['show_comments_count']) ? ($options['show_comments_count'] === 'true') : false;
-        
-        $include_post_types = isset($options['include_post_types']) ? (array) $options['include_post_types'] : array();
-        
-        $post_types = get_post_types(array(
-            'public' => true,
-            '_builtin' => false
-        ), 'objects');
-        
-        if ($post_types && !empty($include_post_types)) {
-            foreach ($post_types as $post_type) {
-                if (in_array($post_type->name, $include_post_types)) {
-                    $args = array(
-                        'post_type' => $post_type->name,
-                        'numberposts' => $posts_per_section > 0 ? $posts_per_section : -1,
-                        'orderby' => $orderby,
-                        'order' => $order,
-                        'post_status' => 'publish'
+        // Произвольные типы записей
+        if (!empty($include_post_types)) {
+            foreach ($include_post_types as $post_type) {
+                if (post_type_exists($post_type)) {
+                    $custom_posts_args = array(
+                        'post_type' => $post_type,
+                        'post_status' => 'publish',
+                        'numberposts' => -1,
                     );
                     
-                    // Если указаны конкретные ID записей для включения
-                    if (!empty($include_posts)) {
-                        $args['include'] = $include_posts;
-                    } else if (!empty($exclude_posts)) {
-                        $args['exclude'] = $exclude_posts;
+                    // Если указаны конкретные ID для включения
+                    if (!empty($include_posts_ids)) {
+                        $custom_posts_args['include'] = $include_posts_ids;
+                    }
+                    // Иначе если указаны ID для исключения
+                    else if (!empty($exclude_posts_ids)) {
+                        $custom_posts_args['exclude'] = $exclude_posts_ids;
                     }
                     
-                    $posts = get_posts($args);
+                    $custom_posts = get_posts($custom_posts_args);
                     
-                    if ($posts) {
-                        echo '<div class="sitemap-section custom-post-type-section">';
-                        echo '<h2 class="sitemap-title">' . $post_type->labels->name . '</h2>';
-                        echo '<ul class="sitemap-list custom-post-type-list">';
-                        
-                        foreach ($posts as $post) {
-                            echo '<li class="sitemap-item custom-post-item">';
-                            echo '<a href="' . get_permalink($post->ID) . '" class="sitemap-link">';
-                            echo apply_filters('the_title', $post->post_title);
-                            
-                            if ($show_date) {
-                                echo ' <span class="post-date">(' . get_the_date('', $post->ID) . ')</span>';
-                            }
-                            
-                            if ($show_comments) {
-                                $comments_count = get_comments_number($post->ID);
-                                echo ' <span class="comments-count">[' . $comments_count . ']</span>';
-                            }
-                            
-                            echo '</a>';
-                            echo '</li>';
-                        }
-                        
-                        echo '</ul>';
-                        echo '</div>';
+                    foreach ($custom_posts as $custom_post) {
+                        $output .= self::generate_xml_url_entry(
+                            get_permalink($custom_post->ID),
+                            $xml_priority,
+                            $xml_change_frequency,
+                            get_the_modified_time('Y-m-d\TH:i:s+00:00', $custom_post->ID)
+                        );
                     }
                 }
             }
         }
+        
+        $output .= '</urlset>';
+        
+        return $output;
     }
     
     /**
-     * Отображение произвольных таксономий
+     * Генерация отдельной записи URL для XML карты
      */
-    private static function display_custom_taxonomies($options) {
-        $orderby = isset($options['orderby']) ? $options['orderby'] : 'title';
-        $order = isset($options['order']) ? $options['order'] : 'ASC';
-        
-        $include_taxonomies = isset($options['include_taxonomies']) ? (array) $options['include_taxonomies'] : array();
-        
-        $taxonomies = get_taxonomies(array(
-            'public' => true,
-            '_builtin' => false
-        ), 'objects');
-        
-        if ($taxonomies && !empty($include_taxonomies)) {
-            foreach ($taxonomies as $taxonomy) {
-                if (in_array($taxonomy->name, $include_taxonomies)) {
-                    $terms = get_terms(array(
-                        'taxonomy' => $taxonomy->name,
-                        'hide_empty' => true,
-                        'orderby' => $orderby,
-                        'order' => $order
-                    ));
-                    
-                    if ($terms && !is_wp_error($terms)) {
-                        echo '<div class="sitemap-section custom-taxonomy-section">';
-                        echo '<h2 class="sitemap-title">' . $taxonomy->labels->name . '</h2>';
-                        echo '<ul class="sitemap-list custom-taxonomy-list">';
-                        
-                        foreach ($terms as $term) {
-                            echo '<li class="sitemap-item custom-taxonomy-item">';
-                            echo '<a href="' . get_term_link($term) . '" class="sitemap-link">';
-                            echo $term->name;
-                            echo ' <span class="post-count">(' . $term->count . ')</span>';
-                            echo '</a>';
-                            echo '</li>';
-                        }
-                        
-                        echo '</ul>';
-                        echo '</div>';
-                    }
-                }
-            }
+    private static function generate_xml_url_entry($url, $priority, $change_frequency, $lastmod = null) {
+        if (!$lastmod) {
+            $lastmod = date('Y-m-d\TH:i:s+00:00');
         }
+        
+        $entry = "  <url>\n";
+        $entry .= "    <loc>" . esc_url($url) . "</loc>\n";
+        $entry .= "    <lastmod>" . $lastmod . "</lastmod>\n";
+        $entry .= "    <changefreq>" . $change_frequency . "</changefreq>\n";
+        $entry .= "    <priority>" . $priority . "</priority>\n";
+        $entry .= "  </url>\n";
+        
+        return $entry;
     }
 }
