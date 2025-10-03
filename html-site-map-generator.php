@@ -3,7 +3,7 @@
  * Plugin Name: HTML & XML Site Map Generator
  * Plugin URI: https://denistamarin.ru/html-site-map-generator
  * Description: Advanced HTML and XML sitemap generator with admin settings. Генератор HTML и XML карт сайта с настройками в админке.
- * Version: 4.0.0
+ * Version: 1.2.0
  * Author: Denis Tamarin
  * Author URI: https://denistamarin.ru/
  * License: GPL v2 or later
