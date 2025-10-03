@@ -24,7 +24,7 @@ if (defined('HTML_SITE_MAP_GENERATOR_VERSION')) {
 }
 
 // Константы плагина
-define('HTML_SITE_MAP_GENERATOR_VERSION', '4.0.0');
+define('HTML_SITE_MAP_GENERATOR_VERSION', '1.2.0');
 define('HTML_SITE_MAP_GENERATOR_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('HTML_SITE_MAP_GENERATOR_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('HTML_SITE_MAP_GENERATOR_BASENAME', plugin_basename(__FILE__));
